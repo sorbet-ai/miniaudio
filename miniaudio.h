@@ -23712,6 +23712,25 @@ static ma_result ma_device_init_internal__wasapi(ma_context* pContext, ma_device
 
             ma_IPropertyStore_Release(pStore);
         }
+        /* sorbet patch (README-sorbet.md): an exclusive capture stream takes 24-bit
+           samples in 3 bytes at the device's rate and channels when the device takes them, whatever
+           Windows' default format for it says (a UAC2 device may offer 24 and 16 bit, with 16 as the default). */
+        #if defined(MA_WASAPI_EXCLUSIVE_CAPTURE_PREFER_S24)
+        if (deviceType == ma_device_type_capture && wf.nChannels > 0 && wf.nSamplesPerSec > 0) {
+            MA_WAVEFORMATEXTENSIBLE w24 = wf;
+            w24.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+            w24.cbSize = 22;
+            w24.wBitsPerSample = 24;
+            w24.Samples.wValidBitsPerSample = 24;
+            w24.nBlockAlign = (WORD)(w24.nChannels * 3);
+            w24.nAvgBytesPerSec = w24.nSamplesPerSec * w24.nBlockAlign;
+            w24.SubFormat = MA_GUID_KSDATAFORMAT_SUBTYPE_PCM;
+            if (SUCCEEDED(ma_IAudioClient_IsFormatSupported((ma_IAudioClient*)pData->pAudioClient, MA_AUDCLNT_SHAREMODE_EXCLUSIVE, (MA_WAVEFORMATEX*)&w24, NULL))) {
+                wf = w24;
+                hr = S_OK;
+            }
+        }
+        #endif
     #else
         /*
         I do not know how to query the device's native format on UWP so for now I'm just disabling support for
@@ -24766,12 +24785,16 @@ static ma_result ma_device_read__wasapi(ma_device* pDevice, void* pFrames, ma_ui
             /* We don't have any cached data pointer, so grab another one. */
             HRESULT hr;
             DWORD flags = 0;
+            ma_uint64 devicePosition = 0, qpcPosition = 0; /* sorbet patch: the packet's position and time */
 
             /* First just ask WASAPI for a data buffer. If it's not available, we'll wait for more. */
-            hr = ma_IAudioCaptureClient_GetBuffer((ma_IAudioCaptureClient*)pDevice->wasapi.pCaptureClient, (BYTE**)&pDevice->wasapi.pMappedBufferCapture, &pDevice->wasapi.mappedBufferCaptureCap, &flags, NULL, NULL);
+            hr = ma_IAudioCaptureClient_GetBuffer((ma_IAudioCaptureClient*)pDevice->wasapi.pCaptureClient, (BYTE**)&pDevice->wasapi.pMappedBufferCapture, &pDevice->wasapi.mappedBufferCaptureCap, &flags, &devicePosition, &qpcPosition);
             if (hr == S_OK) {
                 /* We got a data buffer. Continue to the next loop iteration which will then read from the mapped pointer. */
                 pDevice->wasapi.mappedBufferCaptureLen = pDevice->wasapi.mappedBufferCaptureCap;
+                #if defined(MA_CAPTURE_PACKET_HOOK)
+                MA_CAPTURE_PACKET_HOOK(pDevice, pDevice->wasapi.mappedBufferCaptureCap, (ma_uint32)flags, devicePosition, qpcPosition);
+                #endif
 
                 /*
                 There have been reports that indicate that at times the AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY is reported for every
@@ -35093,6 +35116,10 @@ static OSStatus ma_on_output__coreaudio(void* pUserData, AudioUnitRenderActionFl
 
     MA_ASSERT(pDevice != NULL);
 
+    #if defined(MA_PLAYBACK_TIME_HOOK) /* sorbet patch: the host time this buffer plays at */
+    MA_PLAYBACK_TIME_HOOK(pDevice, frameCount, (pTimeStamp != NULL && (pTimeStamp->mFlags & kAudioTimeStampHostTimeValid)) ? (ma_uint64)pTimeStamp->mHostTime : 0);
+    #endif
+
     /*ma_log_postf(ma_device_get_log(pDevice), MA_LOG_LEVEL_DEBUG, "INFO: Output Callback: busNumber=%d, frameCount=%d, mNumberBuffers=%d\n", (int)busNumber, (int)frameCount, (int)pBufferList->mNumberBuffers);*/
 
     /* We need to check whether or not we are outputting interleaved or non-interleaved samples. The way we do this is slightly different for each type. */
@@ -35181,6 +35208,10 @@ static OSStatus ma_on_input__coreaudio(void* pUserData, AudioUnitRenderActionFla
 
     pRenderedBufferList = (AudioBufferList*)pDevice->coreaudio.pAudioBufferList;
     MA_ASSERT(pRenderedBufferList);
+
+    #if defined(MA_CAPTURE_PACKET_HOOK) /* sorbet patch: the buffer's position and host time */
+    MA_CAPTURE_PACKET_HOOK(pDevice, frameCount, 0, (pTimeStamp != NULL && (pTimeStamp->mFlags & kAudioTimeStampSampleTimeValid)) ? (ma_uint64)pTimeStamp->mSampleTime : 0, (pTimeStamp != NULL && (pTimeStamp->mFlags & kAudioTimeStampHostTimeValid)) ? (ma_uint64)pTimeStamp->mHostTime : 0);
+    #endif
 
     /* We need to check whether or not we are outputting interleaved or non-interleaved samples. The way we do this is slightly different for each type. */
     layout = ma_stream_layout_interleaved;
