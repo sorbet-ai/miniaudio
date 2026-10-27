@@ -7149,6 +7149,9 @@ struct ma_device_config
     #if defined(MA_WASAPI_SHARED_QUEUE)
         ma_uint32 sharedQueueFrames;        /* sorbet patch: a shared playback stream keeps at most this many frames queued (0: the whole buffer). */
     #endif
+    #if defined(MA_WASAPI_SHARED_PERIOD_AT_LEAST)
+        ma_bool8 sharedPeriodAtLeast;       /* sorbet patch: low-latency shared mode takes the smallest engine period at least the period asked. */
+    #endif
     } wasapi;
     struct
     {
@@ -7896,6 +7899,9 @@ struct ma_device
             ma_bool8 loopbackProcessExclude;
         #if defined(MA_WASAPI_SHARED_QUEUE)
             ma_uint32 sharedQueueFrames;                            /* sorbet patch: see ma_device_config.wasapi.sharedQueueFrames. */
+        #endif
+        #if defined(MA_WASAPI_SHARED_PERIOD_AT_LEAST)
+            ma_bool8 sharedPeriodAtLeast;                           /* sorbet patch: see ma_device_config.wasapi.sharedPeriodAtLeast. */
         #endif
             ma_bool8 noAutoConvertSRC;                              /* When set to true, disables the use of AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM. */
             ma_bool8 noDefaultQualitySRC;                           /* When set to true, disables the use of AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY. */
@@ -23611,6 +23617,9 @@ typedef struct
     ma_bool32 noAutoConvertSRC;
     ma_bool32 noDefaultQualitySRC;
     ma_bool32 noHardwareOffloading;
+#if defined(MA_WASAPI_SHARED_PERIOD_AT_LEAST)
+    ma_bool32 sharedPeriodAtLeast; /* sorbet patch */
+#endif
     ma_uint32 loopbackProcessID;
     ma_bool32 loopbackProcessExclude;
 
@@ -23957,21 +23966,23 @@ static ma_result ma_device_init_internal__wasapi(ma_context* pContext, ma_device
                         ma_uint32 desiredPeriodInFrames = pData->periodSizeInFramesOut;
                         ma_uint32 actualPeriodInFrames  = desiredPeriodInFrames;
 
-                    #if defined(MA_WASAPI_SHARED_PERIOD_AT_LEAST)
-                        /* sorbet patch: the smallest engine period min + k * fundamental that is at least the period
-                           asked (or the largest there is), and IAudioClient3 is used with it. */
-                        actualPeriodInFrames = minPeriodInFrames;
-                        while (actualPeriodInFrames < desiredPeriodInFrames && actualPeriodInFrames + fundamentalPeriodInFrames <= maxPeriodInFrames) {
-                            actualPeriodInFrames += fundamentalPeriodInFrames;
-                        }
-                        desiredPeriodInFrames = actualPeriodInFrames;
-                    #else
                         /* Make sure the period size is a multiple of fundamentalPeriodInFrames. */
                         actualPeriodInFrames = actualPeriodInFrames / fundamentalPeriodInFrames;
                         actualPeriodInFrames = actualPeriodInFrames * fundamentalPeriodInFrames;
 
                         /* The period needs to be clamped between minPeriodInFrames and maxPeriodInFrames. */
                         actualPeriodInFrames = ma_clamp(actualPeriodInFrames, minPeriodInFrames, maxPeriodInFrames);
+
+                    #if defined(MA_WASAPI_SHARED_PERIOD_AT_LEAST)
+                        if (pData->sharedPeriodAtLeast) {
+                            /* sorbet patch: the smallest engine period min + k * fundamental that is at least the period
+                               asked (or the largest there is), and IAudioClient3 is used with it. */
+                            actualPeriodInFrames = minPeriodInFrames;
+                            while (actualPeriodInFrames < desiredPeriodInFrames && actualPeriodInFrames + fundamentalPeriodInFrames <= maxPeriodInFrames) {
+                                actualPeriodInFrames += fundamentalPeriodInFrames;
+                            }
+                            desiredPeriodInFrames = actualPeriodInFrames;
+                        }
                     #endif
 
                         ma_log_postf(ma_context_get_log(pContext), MA_LOG_LEVEL_DEBUG, "[WASAPI] Trying IAudioClient3_InitializeSharedAudioStream(actualPeriodInFrames=%d)\n", actualPeriodInFrames);
@@ -24208,6 +24219,9 @@ static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type dev
     data.noAutoConvertSRC           = pDevice->wasapi.noAutoConvertSRC;
     data.noDefaultQualitySRC        = pDevice->wasapi.noDefaultQualitySRC;
     data.noHardwareOffloading       = pDevice->wasapi.noHardwareOffloading;
+#if defined(MA_WASAPI_SHARED_PERIOD_AT_LEAST)
+    data.sharedPeriodAtLeast        = pDevice->wasapi.sharedPeriodAtLeast;
+#endif
     data.loopbackProcessID          = pDevice->wasapi.loopbackProcessID;
     data.loopbackProcessExclude     = pDevice->wasapi.loopbackProcessExclude;
     result = ma_device_init_internal__wasapi(pDevice->pContext, deviceType, NULL, &data);
@@ -24277,6 +24291,9 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
     pDevice->wasapi.noAutoConvertSRC       = pConfig->wasapi.noAutoConvertSRC;
     pDevice->wasapi.noDefaultQualitySRC    = pConfig->wasapi.noDefaultQualitySRC;
     pDevice->wasapi.noHardwareOffloading   = pConfig->wasapi.noHardwareOffloading;
+#if defined(MA_WASAPI_SHARED_PERIOD_AT_LEAST)
+    pDevice->wasapi.sharedPeriodAtLeast    = pConfig->wasapi.sharedPeriodAtLeast;
+#endif
     pDevice->wasapi.loopbackProcessID      = pConfig->wasapi.loopbackProcessID;
     pDevice->wasapi.loopbackProcessExclude = pConfig->wasapi.loopbackProcessExclude;
 #if defined(MA_WASAPI_SHARED_QUEUE)
@@ -24302,6 +24319,9 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
         data.noAutoConvertSRC           = pConfig->wasapi.noAutoConvertSRC;
         data.noDefaultQualitySRC        = pConfig->wasapi.noDefaultQualitySRC;
         data.noHardwareOffloading       = pConfig->wasapi.noHardwareOffloading;
+#if defined(MA_WASAPI_SHARED_PERIOD_AT_LEAST)
+        data.sharedPeriodAtLeast        = pConfig->wasapi.sharedPeriodAtLeast;
+#endif
         data.loopbackProcessID          = pConfig->wasapi.loopbackProcessID;
         data.loopbackProcessExclude     = pConfig->wasapi.loopbackProcessExclude;
 
@@ -24368,6 +24388,9 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
         data.noAutoConvertSRC           = pConfig->wasapi.noAutoConvertSRC;
         data.noDefaultQualitySRC        = pConfig->wasapi.noDefaultQualitySRC;
         data.noHardwareOffloading       = pConfig->wasapi.noHardwareOffloading;
+#if defined(MA_WASAPI_SHARED_PERIOD_AT_LEAST)
+        data.sharedPeriodAtLeast        = pConfig->wasapi.sharedPeriodAtLeast;
+#endif
         data.loopbackProcessID          = pConfig->wasapi.loopbackProcessID;
         data.loopbackProcessExclude     = pConfig->wasapi.loopbackProcessExclude;
 
