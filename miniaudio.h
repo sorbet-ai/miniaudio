@@ -7146,6 +7146,9 @@ struct ma_device_config
         ma_bool8 noHardwareOffloading;      /* Disables WASAPI's hardware offloading feature. */
         ma_uint32 loopbackProcessID;        /* The process ID to include or exclude for loopback mode. Set to 0 to capture audio from all processes. Ignored when an explicit device ID is specified. */
         ma_bool8 loopbackProcessExclude;    /* When set to true, excludes the process specified by loopbackProcessID. By default, the process will be included. */
+    #if defined(MA_WASAPI_SHARED_QUEUE)
+        ma_uint32 sharedQueueFrames;        /* sorbet patch: a shared playback stream keeps at most this many frames queued (0: the whole buffer). */
+    #endif
     } wasapi;
     struct
     {
@@ -7891,6 +7894,9 @@ struct ma_device
             ma_atomic_bool32 isStartedPlayback;                     /* Can be read and written simultaneously across different threads. Must be used atomically, and must be 32-bit. */
             ma_uint32 loopbackProcessID;
             ma_bool8 loopbackProcessExclude;
+        #if defined(MA_WASAPI_SHARED_QUEUE)
+            ma_uint32 sharedQueueFrames;                            /* sorbet patch: see ma_device_config.wasapi.sharedQueueFrames. */
+        #endif
             ma_bool8 noAutoConvertSRC;                              /* When set to true, disables the use of AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM. */
             ma_bool8 noDefaultQualitySRC;                           /* When set to true, disables the use of AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY. */
             ma_bool8 noHardwareOffloading;
@@ -23951,12 +23957,22 @@ static ma_result ma_device_init_internal__wasapi(ma_context* pContext, ma_device
                         ma_uint32 desiredPeriodInFrames = pData->periodSizeInFramesOut;
                         ma_uint32 actualPeriodInFrames  = desiredPeriodInFrames;
 
+                    #if defined(MA_WASAPI_SHARED_PERIOD_AT_LEAST)
+                        /* sorbet patch: the smallest engine period min + k * fundamental that is at least the period
+                           asked (or the largest there is), and IAudioClient3 is used with it. */
+                        actualPeriodInFrames = minPeriodInFrames;
+                        while (actualPeriodInFrames < desiredPeriodInFrames && actualPeriodInFrames + fundamentalPeriodInFrames <= maxPeriodInFrames) {
+                            actualPeriodInFrames += fundamentalPeriodInFrames;
+                        }
+                        desiredPeriodInFrames = actualPeriodInFrames;
+                    #else
                         /* Make sure the period size is a multiple of fundamentalPeriodInFrames. */
                         actualPeriodInFrames = actualPeriodInFrames / fundamentalPeriodInFrames;
                         actualPeriodInFrames = actualPeriodInFrames * fundamentalPeriodInFrames;
 
                         /* The period needs to be clamped between minPeriodInFrames and maxPeriodInFrames. */
                         actualPeriodInFrames = ma_clamp(actualPeriodInFrames, minPeriodInFrames, maxPeriodInFrames);
+                    #endif
 
                         ma_log_postf(ma_context_get_log(pContext), MA_LOG_LEVEL_DEBUG, "[WASAPI] Trying IAudioClient3_InitializeSharedAudioStream(actualPeriodInFrames=%d)\n", actualPeriodInFrames);
                         ma_log_postf(ma_context_get_log(pContext), MA_LOG_LEVEL_DEBUG, "    defaultPeriodInFrames=%d\n", defaultPeriodInFrames);
@@ -24263,6 +24279,9 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
     pDevice->wasapi.noHardwareOffloading   = pConfig->wasapi.noHardwareOffloading;
     pDevice->wasapi.loopbackProcessID      = pConfig->wasapi.loopbackProcessID;
     pDevice->wasapi.loopbackProcessExclude = pConfig->wasapi.loopbackProcessExclude;
+#if defined(MA_WASAPI_SHARED_QUEUE)
+    pDevice->wasapi.sharedQueueFrames      = pConfig->wasapi.sharedQueueFrames;
+#endif
 
     /* Exclusive mode is not allowed with loopback. */
     if (pConfig->deviceType == ma_device_type_loopback && pConfig->playback.shareMode == ma_share_mode_exclusive) {
@@ -25004,6 +25023,26 @@ static ma_result ma_device_write__wasapi(ma_device* pDevice, const void* pFrames
                 bufferSizeInFrames = pDevice->wasapi.actualBufferSizeInFramesPlayback;
             } else {
                 bufferSizeInFrames = pDevice->wasapi.periodSizeInFramesPlayback;
+                #if defined(MA_WASAPI_SHARED_QUEUE)
+                {
+                    /* sorbet patch: at most sharedQueueFrames queued ahead of the mixer (the least latency the
+                       engine period allows), not the whole buffer: wait while another period would exceed it. */
+                    ma_uint32 queueLimit = pDevice->wasapi.sharedQueueFrames;
+                    ma_uint32 padding = 0;
+                    if (queueLimit > 0 && SUCCEEDED(ma_IAudioClient_GetCurrentPadding((ma_IAudioClient*)pDevice->wasapi.pAudioClientPlayback, &padding))) {
+                        if (queueLimit < bufferSizeInFrames) {
+                            queueLimit = bufferSizeInFrames;
+                        }
+                        if (padding + bufferSizeInFrames > queueLimit) {
+                            if (WaitForSingleObject((HANDLE)pDevice->wasapi.hEventPlayback, MA_WASAPI_WAIT_TIMEOUT_MILLISECONDS) != WAIT_OBJECT_0) {
+                                result = MA_ERROR;
+                                break;   /* Wait failed. Probably timed out. */
+                            }
+                            continue;
+                        }
+                    }
+                }
+                #endif
             }
 
             hr = ma_IAudioRenderClient_GetBuffer((ma_IAudioRenderClient*)pDevice->wasapi.pRenderClient, bufferSizeInFrames, (BYTE**)&pDevice->wasapi.pMappedBufferPlayback);
