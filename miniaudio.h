@@ -7899,6 +7899,7 @@ struct ma_device
             ma_bool8 loopbackProcessExclude;
         #if defined(MA_WASAPI_SHARED_QUEUE)
             ma_uint32 sharedQueueFrames;                            /* sorbet patch: see ma_device_config.wasapi.sharedQueueFrames. */
+            ma_bool8 sharedLowLatencyPlayback;                      /* sorbet patch: the shared playback stream runs on IAudioClient3's engine period */
         #endif
         #if defined(MA_WASAPI_SHARED_PERIOD_AT_LEAST)
             ma_bool8 sharedPeriodAtLeast;                           /* sorbet patch: see ma_device_config.wasapi.sharedPeriodAtLeast. */
@@ -24266,6 +24267,9 @@ static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type dev
         ma_IAudioClient_SetEventHandle((ma_IAudioClient*)pDevice->wasapi.pAudioClientPlayback, (HANDLE)pDevice->wasapi.hEventPlayback);
 
         pDevice->wasapi.periodSizeInFramesPlayback = data.periodSizeInFramesOut;
+    #if defined(MA_WASAPI_SHARED_QUEUE)
+        pDevice->wasapi.sharedLowLatencyPlayback = (ma_bool8)data.usingAudioClient3; /* sorbet patch */
+    #endif
         ma_IAudioClient_GetBufferSize((ma_IAudioClient*)pDevice->wasapi.pAudioClientPlayback, &pDevice->wasapi.actualBufferSizeInFramesPlayback);
 
         /* We must always have a valid ID because rerouting will look at it. */
@@ -24459,6 +24463,9 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
         ma_IAudioClient_SetEventHandle((ma_IAudioClient*)pDevice->wasapi.pAudioClientPlayback, (HANDLE)pDevice->wasapi.hEventPlayback);
 
         pDevice->wasapi.periodSizeInFramesPlayback = data.periodSizeInFramesOut;
+    #if defined(MA_WASAPI_SHARED_QUEUE)
+        pDevice->wasapi.sharedLowLatencyPlayback = (ma_bool8)data.usingAudioClient3; /* sorbet patch */
+    #endif
         ma_IAudioClient_GetBufferSize((ma_IAudioClient*)pDevice->wasapi.pAudioClientPlayback, &pDevice->wasapi.actualBufferSizeInFramesPlayback);
 
         /* We must always have a valid ID because rerouting will look at it. */
